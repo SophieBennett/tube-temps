@@ -1,0 +1,343 @@
+---
+title: "The Hottest Tube Line: Modelling Tube Temperatures in R"
+date: "5 Jan 2020" # change before submission
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+```{r libs, include=FALSE}
+
+library(tidyverse)
+library(scales)
+library(olsrr)
+library(extrafont)
+
+loadfonts(device = "win")
+
+```
+
+```{r data, include=FALSE}
+
+# tube temperature data 
+tube_temps <- read_csv("../output-data/tube_temps.csv")
+
+# list of tube stations and respective tube lines
+stations <- read_csv("../output-data/tube_stations.csv")
+
+# tube passenger entry data
+station_numbers <- read_csv("../output-data/station_numbers.csv")
+
+# hex codes for tube lines
+tube_colours <- c("#B36305",
+                    "#E32017",
+                    "#A0A5A9",
+                    "#000000",
+                    "#003688",
+                    "#00782A",
+                    "#0098D4",
+                    "#95CDBA")
+
+```
+Now, I'm the kind of big tube fanatic who has completed the ["Can you name all the stations on the London Underground?" sporcle quiz](https://www.sporcle.com/games/sjb300/london-underground) more times than I can count. But even I have to acknowledge one major drawback of the london tube: it can get *really* bloody hot down there!
+
+I've long suspected the Central line of being the biggest offender in this department, putting it near the bottom in my ranking of favourite tube lines. (The best line, in case you're wondering, is of course, the Victoria line - as recently evidenced by [Geoff Marshall's twitter poll.](https://twitter.com/geofftech/status/1190219484151386113))
+
+But, I'd been lacking hard data to support my theory. 
+
+Thankfully, I discovered recently that TfL have released a dataset of average monthly temparatures across each tube line, giving me the opportunity to do some fun tube-related analyses *and* attempt to make some cool TfL themed graphs. You can download the data yourself [here.](https://data.london.gov.uk/download/london-underground-average-monthly-temperatures/b01c7853-fff2-4781-9755-9b5e1404d78c/lu-average-monthly-temperatures.csv) 
+
+A few things to note about this data:
+
+* The data runs from 2013-2018. The data don't end cleanly on the same month for each tube line. 
+* Tube temperatures appear to be measured daily, at the same time each day, then averaged across each month. The dataset only gives us the month-by-month breakdown.
+* The temperatures are measured at platform level. I'm not sure if temperatures are taken at every station and then averaged or not.
+* The District, Circle, Hammersmith & City, and Metropolitan lines are grouped together into "sub-surface lines".
+
+With that, time to look at the data.
+
+## Visualisation
+***
+
+I started by making some line plots with a playful TfL theme.
+
+```{r lineplot, fig.align="center", echo=FALSE}
+
+tube_temps %>% 
+  ggplot() +
+  ggalt::geom_xspline(aes(date, temperature, color = tube), size = 0.65, alpha = 0.9) +
+  scale_color_manual(values = tube_colours) +
+  labs(y = "Temperature (celsius)",
+       title = "Average Monthly Temperatures in the London Underground") +
+  theme(panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(colour = "#7AECFB", linetype = 3, size = 0.6),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "#7AECFB", fill = NA, linetype = 2),
+        plot.title = element_text(size = 15, family = "Arial", colour = "#031041"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12, vjust = 1.5, family = "Arial", colour = "gray30"),
+        axis.ticks = element_line(colour = "#7AECFB"),
+        axis.text = element_text(family = "Arial"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "white"),
+        legend.title = element_blank()) +
+  scale_x_date(date_labels = "%Y (%b)", breaks = '1 year', expand = c(0.01,1)) +
+  guides(colour = guide_legend(nrow = 1))
+
+```
+
+
+The line plot is imo a little messy, but it does already draw out some interesting features. For instance, the hottest line is actually the *Bakerloo*, followed closely by the Central line. On the other hand, the sub-surface lines are the coldest lines, which isn't super surprising. 
+
+There's also clear periodicity in the data driven by seasonal changes; the temperatures rise sharply during the summer and fall again over the winter. Interestingly, the sub-surface lines seem more susceptible to changes in season than other lines.
+
+Lastly, if you look carefully, the temperatures seem to be getting slightly hotter each year. We can see this more clearly by averaging temperatures across years:
+
+```{r lineplot 2, fig.align="center", echo = FALSE}
+
+tube_temps %>% 
+  filter(Year < "2018") %>% 
+  group_by(tube, Year) %>% 
+  summarise(avg_temp = mean(temperature)) %>% 
+  ggplot() +
+  geom_line(aes(Year, avg_temp, color = tube), size = 1.5, alpha = 0.8) +
+  scale_color_manual(values = tube_colours) +
+  labs(y = "Temperature (celsius)",
+       title = "Average Yearly Temperatures in the London Underground") +
+  theme(panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(colour = "#7AECFB", linetype = 3, size = 0.6),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "#7AECFB", fill = NA, linetype = 2),
+        plot.title = element_text(size = 15, family = "Arial", colour = "#031041"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12, vjust = 1.5, family = "Arial", colour = "gray30"),
+        axis.ticks = element_line(colour = "#7AECFB"),
+        axis.text = element_text(family = "Arial"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "white"),
+        legend.title = element_blank()) +
+  guides(colour = guide_legend(nrow = 1))
+
+```
+
+After having some fun with TfL-themed line plots, I also decided to visualise the data through heatmaps, which I actually think end up being a better and cleaner choice of visualisation for this data. (The top figure shows data for the entire date range provided in the dataset, and the bottom figure displays data just from 2017-2018 to enable closer comparison between tube lines.)
+
+```{r tile plot, fig.align="center", echo=FALSE}
+
+p1 <- tube_temps %>% 
+  filter(date < "2018-02-01") %>% 
+  mutate(tube = factor(tube, levels = c("Sub-Surface Lines", 
+                                        "Waterloo and City", 
+                                        "Jubilee", 
+                                        "Piccadilly",
+                                        "Victoria", 
+                                        "Northern", 
+                                        "Central", 
+                                        "Bakerloo"))) %>% 
+  ggplot() +
+  geom_tile(aes(date, tube, fill = temperature), width = 50) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 9),
+        panel.grid = element_blank(),
+        axis.text.y = element_text(size = 9)) +
+  scale_x_date(date_labels = "%Y", breaks = '1 year',
+               expand = c(0,0)) +
+  scale_fill_viridis_c(option = "inferno") +
+  labs(x = "", 
+       y = "",
+       fill = "Temperature") 
+
+p2 <- tube_temps %>% 
+  filter(date > "2016-12-01" & date < "2018-01-01") %>% 
+  mutate(tube = factor(tube, levels = c("Sub-Surface Lines", 
+                                        "Waterloo and City", 
+                                        "Jubilee", 
+                                        "Piccadilly",
+                                        "Victoria", 
+                                        "Northern", 
+                                        "Central", 
+                                        "Bakerloo"))) %>% 
+  ggplot() +
+  geom_tile(aes(date, tube, fill = temperature), width = 50) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 9),
+        panel.grid = element_blank(),
+        axis.text.y = element_text(size = 9)) +
+  scale_x_date(date_labels = "%b", breaks = '1 month',
+               expand = c(0,0)) +
+  scale_fill_viridis_c(option = "inferno") +
+  labs(x = "", 
+       y = "",
+       fill = "Temperature") 
+
+gridExtra::grid.arrange(p1, p2, nrow = 2)
+
+```
+
+The heatmaps enable us to see the patterns in the data more clearly. For instance, in the bottom figure we can see that while the underground lines increase by roughly 5 degrees from winter to summer, the sub-surface lines increase by around 10 whole degrees!
+
+## Modelling Tube Temperatures
+***
+
+Having visualised the data, I immediately wondered how well I could model the large periodicity in temperature, along with the other interesting effects in the data using multiple linear regression. 
+
+I started by making a simple additive model with year, month and tube line as my predictor variables.
+
+```{r model 1, echo = FALSE}
+
+model_1 <- lm(temperature ~ Year + Month + tube, data = tube_temps)
+
+summary(model_1)
+
+```
+
+This additive model already turned out pretty well, yielding an adjusted R^2^ of 0.910.
+
+However, problems emerged when I performed diagnostics to check for violations of linearity/normality (for which I used the [olsrr package](https://cran.r-project.org/web/packages/olsrr/index.html)).  
+
+```{r model 1 plots, echo = FALSE}
+
+hist(model_1$residuals, breaks = 50) 
+
+ols_plot_resid_qq(model_1) 
+
+ols_plot_resid_fit(model_1)
+
+```
+
+From these plots, there appears to be some non-linearity as well as deviation from normality in the residuals, which is confirmed by tests of normality.
+
+```{r model 1 tests, echo = FALSE}
+
+ols_test_normality(model_1) 
+
+
+```
+
+However, my earlier visualisations gave me some clues into the source of the deviations from normality and linearity; we already saw that the seasonality effect is stronger on sub-surface lines than for other tube lines, suggesting an interaction effect between tube line and month.
+
+To confirm my suspicions, I ran two models.
+
+First, I ran a second additive model, excluding the sub-surface lines. This model yields a small improvement in adjusted R^2^. 
+
+```{r model 2, echo = FALSE}
+
+underground_tube_temps <- tube_temps %>% 
+  filter(tube != "Sub-Surface Lines")
+
+model_2 <- lm(temperature ~ Year + Month + tube, data = underground_tube_temps)
+
+summary(model_2)
+
+```
+
+Moreover, the residuals now look to be more normally distributed, and the plot of fitted values vs residuals also looks more promising:
+
+```{r model 2 plots, echo = FALSE}
+
+hist(model_2$residuals, breaks = 50)
+
+ols_plot_resid_qq(model_2)
+
+ols_plot_resid_fit(model_1)
+
+```
+
+With this model looking promising, I decided to run a third model on the full dataset including an interaction term between month and tube line. To avoid testing for interactions between every month and tube line, I created a new dummy variable called "sub-surface"
+
+```{r model 3, echo = FALSE}
+
+model_3_data <- tube_temps %>% 
+  mutate(subsurface = as.factor(ifelse(tube == "Sub-Surface Lines", 1, 0)))
+
+model_3 <- lm(temperature ~ Year + Month + tube + subsurface:Month, data = model_3_data)
+
+summary(model_3)
+
+```
+
+This model yields an even better fit (adjusted R^2^ = 0.934). 
+
+The diagnostic tests also appear more promising for this model (although residuals are still not perfectly normal):
+
+```{r model 3 plots, echo = FALSE}
+
+hist(model_3$residuals, breaks = 50)
+
+ols_plot_resid_qq(model_3)
+
+ols_test_normality(model_3) # data much more normal
+
+ols_plot_resid_fit(model_3)
+
+```
+
+## Further Exploration: Passenger Numbers
+***
+
+Now, the models above achieve a pretty good fit using just three variables; year, month and tube line. But, what exactly does the variable "tube line" represent here? For instance, what is it about the Central line that makes it hotter than the Jubilee?
+
+One possible difference might be in the number of passengers on each line, with more passengers leading to hotter temperatures. On the otherhand, the differences in temperatures across tube lines could also be driven by structural differences between the lines, such as:
+
+* how deep below the ground the tube lines run 
+* what % of the tube journey is made underground
+* differences in the materials used to build the tunnels
+
+I was unable to find a lot of this data. But, I *was* able to find some data on passenger numbers from TfL. 
+
+The data gives the number of passengers (in millions) at each station between 2010-2017. Sadly, I couldn't find data broken down by month so I had to make do with yearly passenger numbers. 
+
+Since the data was broken down by station rather than tube line, I also had to do some work to match up the stations to the tube lines (scraping and cleaning code is provided on github).
+
+So, to what extent does passenger number influence tube temperature? Let's take a look.
+
+```{r passenger numbers, echo = FALSE}
+
+tube_passengers <- stations %>% 
+  select(station = "Station", 
+         line) %>% 
+  left_join(station_numbers, by = "station") %>% 
+  mutate(line = ifelse(line %in% c("District", "Circle", "Metropolitan", "Hammersmith & City"), "Sub-surface Lines", line)) %>% 
+  rename(tube = "line") %>% 
+  group_by(tube, year) %>% 
+  summarise(total_entries = sum(total, na.rm = TRUE),
+            avg_entries = mean(total, na.rm = TRUE)) %>% 
+  filter(!(is.na(year))) %>% 
+  mutate(year = as.numeric(year))
+
+tube_temps_year <- tube_temps %>% 
+  group_by(tube, Year) %>% 
+  summarise(avg_temp = mean(temperature, na.rm = TRUE)) %>% 
+  select(tube, year = "Year", avg_temp) %>% 
+  filter(year != "2018")
+
+tube_temps_year %>% 
+  left_join(tube_passengers, by = c("tube", "year")) %>% 
+  ggplot() +
+  geom_point(aes(avg_entries, avg_temp, colour = tube), size = 2.5) +
+  scale_color_manual(values = tube_colours) +
+  labs(title = "Passenger Number vs Temperature",
+       x = "Number of Passenger Entries (Millions)",
+       y = "Average Yearly Temperature") +
+  theme(panel.background = element_rect(fill = "white"),
+        panel.grid.major = element_line(colour = "#7AECFB", linetype = 3, size = 0.6),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "#7AECFB", fill = NA, linetype = 2),
+        plot.title = element_text(size = 15, family = "Arial", colour = "#031041"),
+        axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 12, vjust = 1.5, family = "Arial", colour = "gray30"),
+        axis.ticks = element_line(colour = "#7AECFB"),
+        axis.text = element_text(family = "Arial"),
+        legend.position = "bottom",
+        legend.key = element_rect(fill = "white"),
+        legend.title = element_blank())
+
+```
+
+Well... not much. There *is* a small effect of passenger number within each tube line, but it certainly doesn't seem to account for the differences in temperatures across tube lines. 
+
+With no access to further tube-related variables I had to end my journey here. However, even with the data I do have, I think there's sufficient evidence to conclude that differences in temperatures across tube lines are probably driven by structural differences rather than passenger numbers.
+
+
